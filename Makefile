@@ -8,7 +8,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = WarriorCheat
 WarriorCheat_FILES = Tweak.x fishhook.c
-WarriorCheat_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable
+WarriorCheat_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function
 WarriorCheat_FRAMEWORKS = UIKit Foundation CoreGraphics
 # ⚠️ 侧载环境无 CydiaSubstrate/ellekit → 一律不链接 substrate，用内置 fishhook
 WarriorCheat_LIBRARIES =

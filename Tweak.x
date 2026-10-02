@@ -264,7 +264,6 @@ static void warrior_write_state(void) {
 static UILabel *g_lblStatus = nil;
 static UIButton *g_btnKill = nil, *g_btnGod = nil, *g_btnSpeed = nil;
 
-static UIColor *wr_red(void)   { return [UIColor colorWithRed:0.89 green:0.22 blue:0.22 alpha:1]; }
 static UIColor *wr_green(void) { return [UIColor colorWithRed:0.18 green:0.72 blue:0.35 alpha:1]; }
 static UIColor *wr_gray(void)  { return [UIColor colorWithWhite:0.35 alpha:1]; }
 
