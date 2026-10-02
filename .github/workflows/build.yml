@@ -28,6 +28,13 @@ jobs:
           fi
           ls $THEOS/sdks
 
+      - name: Install ldid
+        run: |
+          curl -L -o /tmp/ldid https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64
+          chmod +x /tmp/ldid
+          sudo mv /tmp/ldid /usr/local/bin/ldid
+          ldid -v || true
+
       - name: Build
         run: |
           make clean 2>/dev/null || true
