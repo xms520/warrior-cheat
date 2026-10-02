@@ -1,0 +1,11 @@
+Package: com.kunger.warriorcheat
+Name: Warrior 助手
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: 西行伏魔录/BingoGame-mobile 1.0.4 助手 —— 秒杀 / 无敌 / 人物移动速度增加
+Maintainer: kunger
+Author: kunger
+Section: Tweaks
+Depends: mobilesubstrate
+Depiction: https://github.com/xms520/warrior-cheat
+Homepage: https://github.com/xms520/warrior-cheat
