@@ -38,10 +38,11 @@
   var MAX_RED = 1e4;
 
   /* ---------- 移速：重定义 beZ getter（返回 GameAttriTableEnum.speed） ---------- */
+  /* beZ 定义在战斗属性对象(SFightAttrs)原型上，即 unit.hv 的原型，不在 entity 上 */
   function patchSpeed() {
     if (C._speedPatched) return;
-    var u = units(); if (!u.length) return;
-    var proto = Object.getPrototypeOf(u[0]);
+    var u = units(); if (!u.length || !u[0].hv) return;
+    var proto = Object.getPrototypeOf(u[0].hv);
     while (proto) {
       var d = null;
       try { d = Object.getOwnPropertyDescriptor(proto, 'beZ'); } catch (e) {}
