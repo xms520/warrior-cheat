@@ -232,16 +232,22 @@ static void warrior_eval_fmt(NSString *fmt, ...) {
 @interface WarriorPassWindow : UIWindow
 @end
 @implementation WarriorPassWindow
-// ⚠️ 只在 UIWindow 子类上重写 hitTest/pointInside 才有效（子视图上重写无效）
+// ⚠️ 触摸透传必须在 UIWindow 子类上重写；子视图上重写无效。
+//    根因：rootViewController.view 默认铺满窗口且 pointInside 恒 YES，
+//    会吃掉所有空白区触摸 → 必须把它排除掉。
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    return (hit == self) ? nil : hit;
+    if (hit == self) return nil;                                  // 窗口自身不算命中
+    if (hit == self.rootViewController.view) return nil;           // 承载视图不算命中
+    return hit;
 }
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
     for (UIView *v in self.subviews) {
-        if (v.hidden == NO && [v pointInside:[v convertPoint:point fromView:self] withEvent:event]) return YES;
+        if (v == self.rootViewController.view) continue;           // 跳过承载视图
+        if (v.hidden || v.alpha <= 0.01) continue;
+        if ([v pointInside:[v convertPoint:point fromView:self] withEvent:event]) return YES;
     }
-    return NO;
+    return NO;                                                     // 其余区域不接管
 }
 @end
 
@@ -441,7 +447,10 @@ static void warrior_install_ui(void) {
     g_win.windowLevel = UIWindowLevelAlert + 100;
     g_win.backgroundColor = [UIColor clearColor];
     g_win.rootViewController = [[UIViewController alloc] init];
-    // ⚠️ 仅 hidden=NO 不参与触摸派发，必须绑定 windowScene 或 makeKeyAndVisible
+    // ★ 关键：承载视图必须不可交互，否则它铺满全屏、pointInside 恒 YES → 吞掉所有触摸
+    g_win.rootViewController.view.userInteractionEnabled = NO;
+    g_win.rootViewController.view.backgroundColor = [UIColor clearColor];
+    // ⚠️ 仅 hidden=NO 不参与触摸派发，必须绑定 windowScene（或用 makeKeyAndVisible）
     if (scene) g_win.windowScene = scene;
     g_win.hidden = NO;
 
