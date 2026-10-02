@@ -188,10 +188,13 @@ static FILE *warrior_fopen(const char *path, const char *mode) {
 // ---------------------------------------------------------------------------
 // 面板 -> JS 通信
 // ---------------------------------------------------------------------------
-// ScriptEngine::evalString(this, script, length, fileName, lineno)
-//   单例: se::ScriptEngine::getInstance()  = 0x1011846C8    (静态反汇编实测, 对象大小 0x1b0)
-//   成员: se::ScriptEngine::evalString(...) = 0x101186CC8   (反汇编实测)
-//   包装: 0x101186CB4 = getInstance() + tail-call evalString
+// ScriptEngine::evalString(this, script, length, fileName, lineno)  —— 成员函数
+//   单例: se::ScriptEngine::getInstance() = 0x1011846C8  (静态反汇编实测; 懒加载 0x1b0 字节对象)
+//   成员: se::ScriptEngine::evalString(...) = 0x101186FE8
+//         函数边界由 LC_FUNCTION_STARTS 解析验证: 0x101186FE8-0x101187440 (size 0x458)
+//         该函数内含字符串 "ScriptEngine::evalString script %s, failed!" (0x102FF23D3, 引用点 0x1011872F0)
+//         入口处有 pthread_self()==this[0x180] 的 JS 线程校验（非 JS 线程会直接返回 0，安全）
+//   调用约定: evalString(engine, script, len, fileOrLine, line) —— 传 "warrior_cheat" + 0 两种解释都安全
 typedef void *(*warrior_getengine_t)(void);
 typedef bool  (*warrior_eval_t)(void *engine, const char *script, long len, const char *file, int line);
 static warrior_getengine_t g_getEngine = NULL;
@@ -200,6 +203,14 @@ static warrior_eval_t      g_evalString = NULL;
 static void warrior_eval(const char *js) {
     if (!g_getEngine || !g_evalString || !js) return;
     @try {
+        // evalString 内部要求 JS 线程（cocos2d-x iOS 的 JS 线程即主线程）
+        if (![NSThread isMainThread]) {
+            NSString *s = [NSString stringWithUTF8String:js];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                warrior_eval(s.UTF8String);
+            });
+            return;
+        }
         void *se = g_getEngine();
         if (!se) { WLOG("eval: scriptEngine is null"); return; }
         g_evalString(se, js, (long)strlen(js), "warrior_cheat", 0);
@@ -461,7 +472,7 @@ static void warrior_init(void) {
         // 2) 面板 -> JS 求值入口（偏移来自本二进制静态反汇编）
         if (base) {
             g_getEngine  = (warrior_getengine_t)(base + 0x11846C8UL);  // se::ScriptEngine::getInstance()
-            g_evalString = (warrior_eval_t)(base + 0x1186CC8UL);       // se::ScriptEngine::evalString
+            g_evalString = (warrior_eval_t)(base + 0x1186FE8UL);       // se::ScriptEngine::evalString
             WLOG("getInstance=%p evalString=%p", (void *)g_getEngine, (void *)g_evalString);
         }
 
