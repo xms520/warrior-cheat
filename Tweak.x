@@ -56,131 +56,54 @@ static uintptr_t warrior_main_base(void) {
 
 // ---------------------------------------------------------------------------
 // 注入: 拦截 main.js 的读取
+//
+//  路径判定（反汇编实测，cocos2d-x 2.4.11 FileUtilsApple::getContents @0x1000396F0）:
+//      adrp/add -> "rb" ; bl _fopen ; bl _ftell ; bl _fread ; bl _fclose
+//    ⇒ 脚本文件读取走 **fopen**，故只 hook fopen 即可，零副作用。
+//
+//  ⚠️ 不要 swizzle -[NSData initWithContentsOfFile:]：
+//     它是 NSData 全家族共用方法，会波及微信/抖音等 SDK 的配置读取，
+//     导致引导中断（登录框不弹）。本版本已删除全部 NSData swizzle。
+//
+//  补丁内容 = 原始 main.js + cheat.js，已按游戏自身算法(*ze* = XXTEA+zlib)重新加密，
+//  游戏解密后原样 evalString，cheat.js 即在引擎内执行。
 // ---------------------------------------------------------------------------
-static NSData *g_patched = nil;
-
-static NSData *warrior_patched_data(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        g_patched = [NSData dataWithBytesNoCopy:(void *)kPatchedMainJS
-                                         length:(NSUInteger)WARRIOR_PATCH_LEN
-                                   freeWhenDone:NO];
-        WLOG("patched main.js ready (%d bytes)", WARRIOR_PATCH_LEN);
-    });
-    return g_patched;
-}
-
-static BOOL warrior_is_main_js(NSString *path) {
-    if (![path isKindOfClass:[NSString class]] || path.length == 0) return NO;
-    return [[path lastPathComponent] isEqualToString:@"main.js"];
-}
-
-// ---- 方式 A: NSData（cocos2d-x FileUtilsApple::getContents 走这里）----
-static IMP g_orig_dwcof = NULL;      // +[NSData dataWithContentsOfFile:]
-static IMP g_orig_dwcofoe = NULL;    // +[NSData dataWithContentsOfFile:options:error:]
-static IMP g_orig_iwcof = NULL;      // -[NSData initWithContentsOfFile:]
-static IMP g_orig_iwcofoe = NULL;    // -[NSData initWithContentsOfFile:options:error:]
-
-static id warrior_dataWithContentsOfFile(Class self, SEL _cmd, NSString *path) {
-    if (warrior_is_main_js(path)) {
-        NSData *d = warrior_patched_data();
-        if (d) { WLOG("inject NSData(dataWithContentsOfFile:) <- %s", path.UTF8String); return d; }
-    }
-    IMP imp = g_orig_dwcof;
-    if (!imp) return nil;
-    return ((id (*)(Class, SEL, NSString *))imp)(self, _cmd, path);
-}
-
-static id warrior_dataWithContentsOfFile_opt(Class self, SEL _cmd, NSString *path,
-                                             NSUInteger opts, NSError **err) {
-    if (warrior_is_main_js(path)) {
-        NSData *d = warrior_patched_data();
-        if (d) { WLOG("inject NSData(dataWithContentsOfFile:options:error:) <- %s", path.UTF8String); return d; }
-    }
-    IMP imp = g_orig_dwcofoe;
-    if (!imp) return nil;
-    return ((id (*)(Class, SEL, NSString *, NSUInteger, NSError **))imp)(self, _cmd, path, opts, err);
-}
-
-// ---- 实例方法（cocos2d-x FileUtilsApple::getContents 主路径）----
-static id warrior_initWithContentsOfFile(id self, SEL _cmd, NSString *path) {
-    if (warrior_is_main_js(path)) {
-        NSData *d = warrior_patched_data();
-        if (d) {
-            WLOG("inject -[NSData initWithContentsOfFile:] <- %s", path.UTF8String);
-            return d;   // 直接返回已构造好的替换对象（等价于初始化结果）
-        }
-    }
-    IMP imp = g_orig_iwcof;
-    if (!imp) return nil;
-    return ((id (*)(id, SEL, NSString *))imp)(self, _cmd, path);
-}
-
-static id warrior_initWithContentsOfFile_opt(id self, SEL _cmd, NSString *path,
-                                             NSUInteger opts, NSError **err) {
-    if (warrior_is_main_js(path)) {
-        NSData *d = warrior_patched_data();
-        if (d) { WLOG("inject -[NSData initWithContentsOfFile:options:error:] <- %s", path.UTF8String); return d; }
-    }
-    IMP imp = g_orig_iwcofoe;
-    if (!imp) return nil;
-    return ((id (*)(id, SEL, NSString *, NSUInteger, NSError **))imp)(self, _cmd, path, opts, err);
-}
-
-static void warrior_swizzle_nsdata(void) {
-    Class cls = objc_getClass("NSData");
-    if (!cls) { WLOG("NSData class not found"); return; }
-
-    Method m1 = class_getClassMethod(cls, @selector(dataWithContentsOfFile:));
-    if (m1) {
-        g_orig_dwcof = method_getImplementation(m1);
-        method_setImplementation(m1, (IMP)warrior_dataWithContentsOfFile);
-        WLOG("swizzled +[NSData dataWithContentsOfFile:]");
-    }
-    Method m2 = class_getClassMethod(cls, @selector(dataWithContentsOfFile:options:error:));
-    if (m2) {
-        g_orig_dwcofoe = method_getImplementation(m2);
-        method_setImplementation(m2, (IMP)warrior_dataWithContentsOfFile_opt);
-        WLOG("swizzled +[NSData dataWithContentsOfFile:options:error:]");
-    }
-    // ★ cocos2d-x FileUtilsApple::getContents 走实例方法
-    Method m3 = class_getInstanceMethod(cls, @selector(initWithContentsOfFile:));
-    if (m3) {
-        g_orig_iwcof = method_getImplementation(m3);
-        method_setImplementation(m3, (IMP)warrior_initWithContentsOfFile);
-        WLOG("swizzled -[NSData initWithContentsOfFile:]");
-    }
-    Method m4 = class_getInstanceMethod(cls, @selector(initWithContentsOfFile:options:error:));
-    if (m4) {
-        g_orig_iwcofoe = method_getImplementation(m4);
-        method_setImplementation(m4, (IMP)warrior_initWithContentsOfFile_opt);
-        WLOG("swizzled -[NSData initWithContentsOfFile:options:error:]");
-    }
-}
-
-// ---- 方式 B: fopen（兜底；命中则改读临时文件）----
 static FILE *(*g_orig_fopen)(const char *, const char *) = NULL;
 static char  g_tmp_mainjs[PATH_MAX] = {0};
+static int   g_inject_hits = 0;
 
+static BOOL warrior_is_main_js(const char *path) {
+    if (!path || !*path) return NO;
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    return strcmp(base, "main.js") == 0;
+}
+
+// 首次命中时把补丁落盘为独立文件（避免递归 fopen 自身）
 static const char *warrior_tmp_mainjs_path(void) {
     if (g_tmp_mainjs[0]) return g_tmp_mainjs;
     NSString *dir = NSTemporaryDirectory();
     if (!dir.length) return NULL;
     NSString *p = [dir stringByAppendingPathComponent:@"warrior_main.js"];
-    if (!g_orig_fopen) return NULL;
     FILE *f = g_orig_fopen(p.UTF8String, "wb");
-    if (!f) return NULL;
-    fwrite(kPatchedMainJS, 1, WARRIOR_PATCH_LEN, f);
+    if (!f) { WLOG("write tmp main.js failed"); return NULL; }
+    size_t w = fwrite(kPatchedMainJS, 1, WARRIOR_PATCH_LEN, f);
     fclose(f);
+    if (w != WARRIOR_PATCH_LEN) { WLOG("write tmp main.js short %zu", w); return NULL; }
     strncpy(g_tmp_mainjs, p.UTF8String, sizeof(g_tmp_mainjs) - 1);
-    WLOG("fopen fallback file: %s", g_tmp_mainjs);
+    WLOG("tmp patched main.js -> %s (%d bytes)", g_tmp_mainjs, WARRIOR_PATCH_LEN);
     return g_tmp_mainjs;
 }
 
 static FILE *warrior_fopen(const char *path, const char *mode) {
-    if (path && strstr(path, "main.js")) {
+    if (warrior_is_main_js(path) && mode && mode[0] == 'r') {
+        // 只拦读取；写模式(main.js 不会被写)放行
         const char *t = warrior_tmp_mainjs_path();
-        if (t) { WLOG("inject fopen <- %s", path); return g_orig_fopen(t, mode); }
+        if (t) {
+            g_inject_hits++;
+            WLOG("INJECT fopen #%d  %s", g_inject_hits, path);
+            return g_orig_fopen(t, mode);
+        }
     }
     return g_orig_fopen(path, mode);
 }
@@ -473,7 +396,6 @@ static void warrior_init(void) {
         WLOG("main base = 0x%lx", (unsigned long)base);
 
         // 1) 注入: 脚本读取拦截
-        warrior_swizzle_nsdata();
         struct rebinding rb[] = { {"fopen", (void *)warrior_fopen, (void **)&g_orig_fopen} };
         int r = rebind_symbols(rb, 1);
         WLOG("fishhook fopen ret=%d", r);
