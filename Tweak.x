@@ -246,7 +246,8 @@ static BOOL   g_god  = NO;
 static double g_speed = 1.0;
 
 static UILabel  *g_lblStatus = nil;
-static UIButton *g_btnKill = nil, *g_btnGod = nil, *g_btnSpeed = nil;
+static UIButton *g_btnKill = nil, *g_btnGod = nil, *g_btnSpeed = nil, *g_btnAuto = nil;
+static BOOL      g_auto = NO;
 
 static UIColor *wr_green(void) { return [UIColor colorWithRed:0.18 green:0.72 blue:0.35 alpha:1]; }
 static UIColor *wr_gray(void)  { return [UIColor colorWithWhite:0.35 alpha:1]; }
@@ -259,6 +260,10 @@ static void warrior_refresh_panel(void) {
     [g_btnGod setTitle:(g_god ? @"无敌 开" : @"无敌 关") forState:UIControlStateNormal];
     [g_btnSpeed setTitle:[NSString stringWithFormat:@"移速 x%.1f", g_speed] forState:UIControlStateNormal];
     g_btnSpeed.backgroundColor = (g_speed > 1.0001) ? wr_green() : wr_gray();
+    if (g_btnAuto) {
+        g_btnAuto.backgroundColor = g_auto ? wr_green() : wr_gray();
+        [g_btnAuto setTitle:(g_auto ? @"自动 开" : @"自动 关") forState:UIControlStateNormal];
+    }
     if (g_lblStatus) {
         g_lblStatus.text = @"[WARRIOR] " "Warrior 助手已加载";
     }
@@ -328,6 +333,14 @@ static void warrior_refresh_panel(void) {
     [g_btnSpeed addTarget:self action:@selector(onSpeed) forControlEvents:UIControlEventTouchUpInside];
     [self addSubview:g_btnSpeed];
 
+    y += bh + 10;
+    g_btnAuto = [UIButton buttonWithType:UIButtonTypeCustom];
+    g_btnAuto.frame = CGRectMake(12, y, bw, bh);
+    g_btnAuto.layer.cornerRadius = 8;
+    g_btnAuto.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    [g_btnAuto addTarget:self action:@selector(onAuto) forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:g_btnAuto];
+
     UIButton *close = [UIButton buttonWithType:UIButtonTypeCustom];
     close.frame = CGRectMake(W - 34, 6, 28, 28);
     [close setTitle:@"×" forState:UIControlStateNormal];
@@ -354,6 +367,11 @@ static void warrior_refresh_panel(void) {
     idx = (idx + 1) % 5;
     g_speed = steps[idx];
     warrior_eval_fmt(@"window.warriorCheatSet&&window.warriorCheatSet('speed',%.2f);", g_speed);
+    warrior_refresh_panel();
+}
+- (void)onAuto {
+    g_auto = !g_auto;
+    warrior_eval_fmt(@"window.warriorCheatSet&&window.warriorCheatSet('auto',%@);", g_auto ? @"true" : @"false");
     warrior_refresh_panel();
 }
 - (void)onClose { [g_panel removeFromSuperview]; g_panel = nil; }
@@ -386,7 +404,7 @@ static BOOL    g_ballMoved = NO;
 }
 - (void)openPanel {
     if (g_panel) { [g_panel removeFromSuperview]; g_panel = nil; return; }
-    CGFloat W = 220, H = 210;
+    CGFloat W = 220, H = 260;
     CGFloat x = g_win.bounds.size.width - W - 12;
     if (x < 12) x = 12;
     CGFloat y = MAX(60, self.center.y - H / 2);
