@@ -179,13 +179,38 @@ static void warrior_try_inject(void) {
     }
 }
 
+static void warrior_start_pump(void);   // fwd
+
 static void warrior_schedule_poll(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         warrior_try_inject();
-        if (g_injected) return;
+        if (g_injected) { warrior_start_pump(); return; }
         if (g_tryCount >= WARRIOR_MAX_TRY) { WLOG("give up after %d tries", g_tryCount); return; }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ warrior_schedule_poll(); });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 原生 pump：注入成功后，低频（1s）在主线程推动 JS 侧 onFrame
+//   目的：不依赖 jsb 的 setInterval 是否有驱动器；也避开 scheduler 的 target 校验问题
+//   注意：先探测 window.warriorTick 是否存在，存在才调用（避免无谓报错）
+// ---------------------------------------------------------------------------
+static int g_pumpCount = 0;
+#define WARRIOR_PUMP_MAX 1800      // 1800 次 ≈ 30 分钟，之后停止（避免长期占用主线程）
+
+static void warrior_start_pump(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        g_pumpCount++;
+        if (g_pumpCount > WARRIOR_PUMP_MAX) return;
+        // 引擎仍就绪才调用
+        void *se = NULL;
+        @try { se = g_getEngine ? g_getEngine() : NULL; } @catch (NSException *e) { se = NULL; }
+        if (se && warrior_engine_ready(se)) {
+            warrior_eval_now("if(typeof window.warriorTick==='function')window.warriorTick();");
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ warrior_start_pump(); });
     });
 }
 
