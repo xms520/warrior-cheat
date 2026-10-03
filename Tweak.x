@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <limits.h>
 #include <unistd.h>
 
 #include "cheat_js.h"      // kCheatJS —— cheat.js 源码（明文 C 字符串）
@@ -88,6 +89,17 @@ static BOOL  g_injected = NO;
 static int   g_tryCount = 0;
 #define  WARRIOR_MAX_TRY  400      // 400 × 0.25s ≈ 100s，覆盖冷启动+资源热更
 
+// 注入前先设置可写路径（cheat.js 用 window.__WR_PATH__ 拼日志路径）
+static char  g_wr_path[PATH_MAX] = {0};
+static NSString *warrior_writable_path(void) {
+    if (g_wr_path[0]) return [NSString stringWithUTF8String:g_wr_path];
+    NSString *d = NSTemporaryDirectory();
+    if (!d.length) d = @"/tmp/";
+    if (![d hasSuffix:@"/"]) d = [d stringByAppendingString:@"/"];
+    strncpy(g_wr_path, d.UTF8String, sizeof(g_wr_path) - 1);
+    return d;
+}
+
 static void warrior_try_inject(void) {
     if (g_injected) return;
     g_tryCount++;
@@ -105,7 +117,15 @@ static void warrior_try_inject(void) {
 
     // ⚠️ evalString 内部有 pthread_self()==engine[0x180] 的 JS 线程校验，
     //    必须主线程调用（cocos2d-x iOS 的 JS 线程即主线程）
-    bool ok = warrior_eval_now(kCheatJS);
+    NSString *path = warrior_writable_path();
+    NSString *prelude = [NSString stringWithFormat:@"window.__WR_PATH__=%@;",
+                         [NSString stringWithFormat:@"\"%@\"", path]];
+    bool ok = warrior_eval_now(prelude.UTF8String);
+    if (!ok) {
+        if (g_tryCount % 10 == 0) WLOG("eval prelude => FAILED (engine=%p, try#%d)", se, g_tryCount);
+        return;
+    }
+    ok = warrior_eval_now(kCheatJS);
     WLOG("eval cheat.js => %s (engine=%p, try#%d)", ok ? "OK" : "FAILED", se, g_tryCount);
 
     if (ok) {

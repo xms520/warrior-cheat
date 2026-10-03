@@ -1,191 +1,229 @@
 /**
- *  Warrior 1.0.4 修改脚本（cocos creator 2.4.11 / V8）
- *  注入时机：hook ScriptEngine::onGetStringFromFile(0x101158fd4)，读 main.js 后 evalString 本脚本
- *  运行前提：window.$fc / $fc.battleMgr.bBl 由游戏自身创建
+ *  Warrior 1.0.4 修改脚本 v1.0.4
+ *  环境: Cocos Creator 2.4.11 + cocos2d-x + V8 (jsb)
+ *  注入: 原生侧 ScriptEngine::evalString 直接执行本源码（无文件 IO）
+ *
+ *  ★ v1.0.4 修复「开启功能闪退」：
+ *    1) 无敌改为「完全照抄游戏内置 GM 命令 H」的数值模板 + 前置检查，
+ *       避免 hpMax 旧值为 0 时 beJ 内部 `beu/i` 除零产生 NaN。
+ *    2) 移速**不再重定义 beZ getter**（defineProperty 会破坏 V8 内联缓存、
+ *       可能被原生层持有旧描述符而崩溃），改为 beJ(speed, 增量) 差值写入。
+ *    3) 秒杀严格照抄游戏内置命令 I：`e.hX(me, e.hv.beu)`（只传 2 参）。
+ *    4) 所有写操作前做「战斗就绪 + 属性就绪 + 数值合法」三重校验。
+ *    5) 异常落盘到 window.__WR_PATH__ + warrior_dbg.txt，便于诊断。
  */
 (function () {
   if (window.__WARRIOR_CHEAT__) return;
 
   var C = {
-    version: '1.0.0',
+    version: '1.0.4',
     kill: false,      // 秒杀
     god: false,       // 无敌
     speed: 1.0,       // 移动速度倍率
-    _speedPatched: false,
-    _godApplied: false,
-    _lastErr: ''
+    err: '',
+    _errN: 0,
+    _spd: null        // WeakMap: hv -> 已施加的 speed 增量
   };
   window.__WARRIOR_CHEAT__ = C;
 
-  /* ---------- 基础访问器（全部空安全） ---------- */
-  function FC() { try { return window.$fc || null; } catch (e) { return null; } }
-  function battleInst() {
-    try { var f = FC(); return (f && f.battleMgr && f.battleMgr.bBl) ? f.battleMgr.bBl : null; }
-    catch (e) { return null; }
+  /* ---------------- 日志（仅异常时落盘，避免 IO 压力） ---------------- */
+  function fail(where, e) {
+    C.err = where + ': ' + ((e && e.message) ? e.message : String(e));
+    if (C._errN++ > 20) return;
+    try {
+      var fu = (typeof jsb !== 'undefined') && jsb.fileUtils;
+      if (!fu || typeof fu.writeStringToFile !== 'function') return;
+      var p = (window.__WR_PATH__ || '') + 'warrior_dbg.txt';
+      var old = (typeof fu.getStringFromFile === 'function') ? (fu.getStringFromFile(p) || '') : '';
+      // cocos 签名: writeStringToFile(content, fullPath)
+      fu.writeStringToFile((old + C.err + '\n').slice(-4000), p);
+    } catch (x) {}
   }
-  function ctx() { var b = battleInst(); try { return (b && b.ne) ? b.ne : null; } catch (e) { return null; } }
-  function units() {
-    var c = ctx(); if (!c) return [];
-    try { return (c.fu && c.fu.bkN) ? c.fu.bkN : []; } catch (e) { return []; }
+  function ok(msg) {
+    try {
+      var fu = (typeof jsb !== 'undefined') && jsb.fileUtils;
+      if (!fu || typeof fu.writeStringToFile !== 'function') return;
+      var p = (window.__WR_PATH__ || '') + 'warrior_dbg.txt';
+      fu.writeStringToFile(msg + '\n', p);
+    } catch (x) {}
   }
-  function me() { var c = ctx(); try { return (c && c.nx) ? c.nx : null; } catch (e) { return null; } }
-  function myCamp() { var m = me(); try { return (m && m.hD) ? m.hD.biI : -1; } catch (e) { return -1; } }
-  function campOf(e) { try { return (e && e.hD) ? e.hD.biI : null; } catch (err) { return null; } }
 
-  /* ---------- 属性枚举（实测 AttributeTableEnum） ---------- */
-  var ATTR = { hpMax: 5, ap: 7, sp: 8, atkSpeed: 20, speed: 22, finalDamageRed: 36 };
+  /* ---------------- 安全访问器 ---------------- */
+  function FC()   { try { return window.$fc || null; } catch (e) { return null; } }
+  function BI()   { try { var f = FC(); return (f && f.battleMgr && f.battleMgr.bBl) ? f.battleMgr.bBl : null; } catch (e) { return null; } }
+  function CTX()  { var b = BI(); try { return (b && b.ne) ? b.ne : null; } catch (e) { return null; } }
+  // 战斗是否进行中（bBl.nl() 返回 this.mG）
+  function inBattle() {
+    var b = BI(); if (!b) return false;
+    try { if (typeof b.nl === 'function') return !!b.nl(); } catch (e) {}
+    return !!CTX();
+  }
+  function ME()   { var c = CTX(); try { return (c && c.nx) ? c.nx : null; } catch (e) { return null; } }
+  function CAMP() { var m = ME(); try { return (m && m.hD) ? m.hD.biI : -1; } catch (e) { return -1; } }
+  function UNITS(){ var c = CTX(); try { return (c && c.fu && c.fu.bkN) ? c.fu.bkN : []; } catch (e) { return []; } }
+  function campOf(e) { try { return (e && e.hD) ? e.hD.biI : null; } catch (x) { return null; } }
+
+  /* ---------------- 属性枚举（实测 AttributeTableEnum） ---------------- */
+  var A_HPMAX = 5, A_AP = 7, A_SP = 8, A_ATKSPD = 20, A_CASTSPD = 21, A_SPEED = 22, A_DMGRED = 36;
   var BIG_HP = 3147483648;
-  var MAX_RED = 1e4;
 
-  /* ---------- 移速：重定义 beZ getter（返回 GameAttriTableEnum.speed） ---------- */
-  /* beZ 定义在战斗属性对象(SFightAttrs)原型上，即 unit.hv 的原型，不在 entity 上 */
-  function patchSpeed() {
-    if (C._speedPatched) return;
-    var u = units(); if (!u.length || !u[0].hv) return;
-    var proto = Object.getPrototypeOf(u[0].hv);
-    while (proto) {
-      var d = null;
-      try { d = Object.getOwnPropertyDescriptor(proto, 'beZ'); } catch (e) {}
-      if (d && typeof d.get === 'function') {
-        var orig = d.get;
-        Object.defineProperty(proto, 'beZ', {
-          configurable: true,
-          enumerable: !!d.enumerable,
-          get: function () { return orig.call(this) * (C.speed || 1); }
-        });
-        C._speedPatched = true;
-        return;
-      }
-      proto = Object.getPrototypeOf(proto);
+  /* ---------------- 无敌（照抄游戏内置 GM 命令 H 的数值模板） ----------------
+   *  内置源码:
+   *    if (i.hv.bfG() < 3147483648) {
+   *        i.hv.beJ(hpMax, 3147483648);  i.hv.beu = i.hv.bev;
+   *        i.hv.beJ(ap, 1e5); i.hv.beJ(sp, 1e5);
+   *        i.hv.beJ(speed, 15e3);         // ★ 移速已拆出，避免与移速功能叠加
+   *        i.hv.beJ(atkSpeed, 1e4); i.hv.beJ(castSpeed, 1e4);
+   *        i.hv.beJ(finalDamageRed, 1e4);
+   *    }
+   *  ⚠️ 必须保留 bfG() 前置检查：hpMax 旧值为 0 时 beJ 内部 `beu/i` 会除零 → NaN → 崩
+   */
+  function godOn(hv) {
+    if (!hv || typeof hv.beJ !== 'function') return;
+    var already = false;
+    try { already = (typeof hv.bfG === 'function') && (hv.bfG() >= BIG_HP); } catch (e) {}
+    if (!already) {
+      // 再确认旧上限非 0（bev 来自属性表；若为 0 会导致除零）
+      var oldMax = 0;
+      try { oldMax = hv.bev; } catch (e) { oldMax = 0; }
+      if (!(oldMax > 0)) { fail('godOn', 'hpMax<=0, skip'); return; }
+      hv.beJ(A_HPMAX, BIG_HP);
+      try { hv.beu = hv.bev; } catch (e) {}
+      hv.beJ(A_AP, 1e5);
+      hv.beJ(A_SP, 1e5);
+      hv.beJ(A_ATKSPD, 1e4);
+      hv.beJ(A_CASTSPD, 1e4);
+      hv.beJ(A_DMGRED, 1e4);
+      try { hv.beD = 1; } catch (e) {}    // 死亡自动回满（游戏内建）
     }
+    // 维持满血
+    try { if (hv.beu < hv.bev) hv.beu = hv.bev; } catch (e) {}
   }
-
-  /* ---------- 无敌：完全复刻游戏内置 GM 命令 H($ug.H) 的数值模板 ---------- */
-  function godOn(e) {
-    var hv = e.hv; if (!hv) return;
-    if (typeof hv.beJ === 'function') {
-      hv.beJ(ATTR.hpMax, BIG_HP);
-      hv.beJ(ATTR.ap, 1e5);
-      hv.beJ(ATTR.sp, 1e5);
-      hv.beJ(ATTR.speed, 15000);
-      hv.beJ(ATTR.atkSpeed, 1e4);
-      hv.beJ(ATTR.finalDamageRed, MAX_RED);
-    }
-    try { hv.beu = hv.bev; } catch (err) {}
-    try { hv.beD = 1; } catch (err) {}      // 死亡时自动回满（游戏内建机制）
-    e.__wg = true;
-  }
-  function godOff(e) {
-    var hv = e.hv; if (!hv) return;
-    if (typeof hv.beK === 'function') {
-      hv.beK(ATTR.hpMax, BIG_HP);
-      hv.beK(ATTR.ap, 1e5);
-      hv.beK(ATTR.sp, 1e5);
-      hv.beK(ATTR.speed, 15000);
-      hv.beK(ATTR.atkSpeed, 1e4);
-      hv.beK(ATTR.finalDamageRed, MAX_RED);
-    }
-    try { hv.beD = 0; } catch (err) {}
-    e.__wg = false;
+  function godOff(hv) {
+    if (!hv || typeof hv.beK !== 'function') return;
+    try {
+      hv.beK(A_HPMAX, BIG_HP);
+      hv.beK(A_AP, 1e5);
+      hv.beK(A_SP, 1e5);
+      hv.beK(A_ATKSPD, 1e4);
+      hv.beK(A_CASTSPD, 1e4);
+      hv.beK(A_DMGRED, 1e4);
+      hv.beD = 0;
+    } catch (e) { fail('godOff', e); }
   }
 
   function applyGod() {
-    var mc = myCamp();
-    if (mc < 0) return;
-    var list = units();
+    var mc = CAMP(); if (mc < 0) return;
+    var list = UNITS();
     for (var i = 0; i < list.length; i++) {
       var e = list[i];
       try {
         if (!e || !e.hv) continue;
-        if (campOf(e) !== mc) continue;           // 只作用于己方阵营
+        if (campOf(e) !== mc) continue;                    // 仅己方
         if (C.god) {
-          if (!e.__wg) godOn(e);
-          if (e.hv.beu < e.hv.bev) e.hv.beu = e.hv.bev;   // 持续满血
+          godOn(e.hv);
+          e.__wg = 1;
         } else if (e.__wg) {
-          godOff(e);
+          godOff(e.hv);
+          e.__wg = 0;
         }
-      } catch (err) {}
+      } catch (err) { fail('applyGod', err); }
     }
-    C._godApplied = C.god;
   }
 
-  /* ---------- 秒杀：对敌方调用实体受击函数 hX(attacker, damage=目标当前HP) ---------- */
+  /* ---------------- 秒杀（照抄游戏内置 GM 命令 I） ----------------
+   *  内置源码:
+   *    var i = t.gi(e.cXZ);                       // 施法者(自己)
+   *    i && t.fu.bkN.forEach(function(t) {
+   *        if (t.hx && t.hD.biI !== i.hD.biI) {   // 有输入 且 不同阵营
+   *            t.hX(i, t.hv.beu);                 // ★ 只传 2 参
+   *            a.default.GJ(t, 0, 0);             // 死亡表现(内部函数, 外部不可达; hX 内部已含 GL)
+   *        }
+   *    });
+   */
   function applyKill() {
-    var m = me(); if (!m) return;
-    var mc = myCamp();
-    var list = units();
+    var m = ME(); if (!m || !m.hv) return;
+    var mc = CAMP();
+    var list = UNITS();
     for (var i = 0; i < list.length; i++) {
       var e = list[i];
       try {
         if (!e || !e.hv || e === m) continue;
-        if (campOf(e) === mc) continue;           // 只打敌方
-        if (!(e.hv.beu > 0)) continue;
-        if (typeof e.hX === 'function') {
-          e.hX(m, e.hv.beu, null);                // 伤害 = 目标满血 → 一击必杀
-        } else {
-          e.hv.beu = 0;                           // 兜底：直接置 0
-        }
-      } catch (err) { C._lastErr = '' + err; }
+        if (campOf(e) === mc) continue;                    // 仅敌方
+        if (typeof e.hX !== 'function') continue;          // 必须有受击方法
+        var dmg = e.hv.beu;
+        if (!(dmg > 0)) continue;                          // 血量为 0/NaN 跳过
+        e.hX(m, dmg);                                      // 伤害=目标当前血 → 一击必杀
+      } catch (err) { fail('applyKill', err); }
     }
   }
 
-  /* ---------- 状态来源（二选一，互为兜底）----------
-   *  1) window.warriorCheatSet() —— 原生面板通过 ScriptEngine::evalString 调用（主通道）
-   *  2) 状态文件轮询 —— 仅当 jsb.fileUtils 存在时启用（越狱/可写沙盒环境）
-   *  注意：非越狱(全能签)环境下 fs 可能不可写，此处全程 try/catch，失败不影响主通道
+  /* ---------------- 移速（beJ(speed, 增量)，绝不改 getter） ----------------
+   *  beZ.get = beI(A_SPEED)；beJ(A_SPEED, v) 会对属性表做加法。
+   *  用 WeakMap 记录每个属性对象已施加的增量，做到可逆、幂等。
+   *  ⚠️ 绝不 Object.defineProperty(proto,'beZ')：会破坏 V8 内联缓存 → 崩溃
    */
-  var _fileChecked = false;
-  function pollStateFile() {
-    if (_fileChecked) return;
-    try {
-      var fu = (typeof jsb !== 'undefined') && jsb.fileUtils;
-      if (!fu || typeof fu.getStringFromFile !== 'function') { _fileChecked = true; return; }
-      var p = (typeof fu.getWritablePath === 'function' ? fu.getWritablePath() : '') + 'warrior_state.txt';
-      var s = fu.getStringFromFile(p);
-      if (!s || typeof s !== 'string') return;      // 文件还没写，下次再试
-      var m = /kill=(\d+),god=(\d+),speed=([0-9.]+)/.exec(s);
-      if (!m) { _fileChecked = true; return; }
-      var k = m[1] === '1', g = m[2] === '1', sp = parseFloat(m[3]) || 1;
-      C.kill = k; C.god = g; C.speed = sp;
-      _fileChecked = true;                          // 读到一次即固化
-      console.log('[WARRIOR] state from file: kill=' + k + ' god=' + g + ' speed=' + sp);
-    } catch (e) { _fileChecked = true; }
+  function applySpeed() {
+    if (!C._spd) { try { C._spd = new WeakMap(); } catch (e) { return; } }
+    var mc = CAMP(); if (mc < 0) return;
+    var mult = C.speed || 1;
+    var list = UNITS();
+    for (var i = 0; i < list.length; i++) {
+      var e = list[i];
+      try {
+        if (!e || !e.hv) continue;
+        if (campOf(e) !== mc) continue;                    // 仅己方
+        var hv = e.hv;
+        if (typeof hv.beI !== 'function' || typeof hv.beJ !== 'function') continue;
+        var cur = hv.beI(A_SPEED);
+        if (typeof cur !== 'number' || !isFinite(cur)) continue;
+        var applied = C._spd.get(hv) || 0;
+        var base = cur - applied;                          // 还原基准值
+        if (!(base > 0)) continue;
+        var want = Math.round(base * mult);
+        var delta = want - cur;
+        if (delta !== 0) {
+          hv.beJ(A_SPEED, delta);
+          C._spd.set(hv, applied + delta);
+        }
+      } catch (err) { fail('applySpeed', err); }
+    }
   }
 
+  /* ---------------- 主循环 ---------------- */
   function tick() {
     try {
-      pollStateFile();
-      if (!ctx()) return;
-      if (C.speed && C.speed !== 1) patchSpeed();
-      applyGod();
+      if (!inBattle()) return;
+      if (!CTX()) return;
+      if (C.god) applyGod();
       if (C.kill) applyKill();
-    } catch (e) { C._lastErr = '' + e; }
+      if (C.speed && C.speed !== 1) applySpeed();
+    } catch (e) { fail('tick', e); }
   }
-
-  // cocos 环境优先用 cc.director 的调度器；退化为原生 setInterval
   function startLoop() {
     try {
       if (typeof cc !== 'undefined' && cc.director && typeof cc.director.getScheduler === 'function') {
-        cc.director.getScheduler().schedule(function () { tick(); }, 0, 0.12, false, 1, 0);
+        // 每帧检查，但内部有开关判断，开销可忽略
+        cc.director.getScheduler().schedule(function () { tick(); }, 0, 1 / 60, false, 1, 0);
         return;
       }
     } catch (e) {}
-    try { setInterval(tick, 120); } catch (e) {}
+    try { setInterval(tick, 150); } catch (e) {}
   }
   startLoop();
 
-  /* ---------- 原生面板桥 ---------- */
+  /* ---------------- 原生面板桥 ---------------- */
   C.set = function (k, v) {
     if (k === 'speed') { C.speed = Number(v) || 1.0; return C.speed; }
     C[k] = !!v;
-    if (k === 'god' && !v) applyGod();   // 立刻还原
+    if (k === 'god' && !v) applyGod();   // 关闭时立刻还原
     return C[k];
   };
   C.status = function () {
-    return JSON.stringify({ kill: C.kill, god: C.god, speed: C.speed, err: C._lastErr });
+    return JSON.stringify({ kill: C.kill, god: C.god, speed: C.speed, err: C.err });
   };
   window.warriorCheatSet = C.set;
   window.warriorCheatStatus = C.status;
 
-  try { console.log('[WARRIOR] cheat v' + C.version + ' loaded, waiting for $fc ...'); } catch (e) {}
+  ok('[WARRIOR] cheat v' + C.version + ' loaded, path=' + (window.__WR_PATH__ || '?'));
 })();
