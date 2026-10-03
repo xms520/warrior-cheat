@@ -29,6 +29,7 @@
 #include <stdarg.h>
 #include <limits.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include "cheat_js.h"      // kCheatJS —— cheat.js 源码（明文 C 字符串）
 
@@ -83,11 +84,44 @@ static bool warrior_eval_now(const char *js) {
 }
 
 // ---------------------------------------------------------------------------
-// 注入：轮询到引擎就绪后 evalString(cheat.js)
+// 注入：轮询到引擎「真正就绪」后 evalString(cheat.js)
+//
+//  ⚠️ 崩溃教训（v1.0.3→v1.0.4）：
+//     v1.0.3 在引擎未就绪时反复调用 evalString，命中了引擎初始化中的危险窗口 → 原生崩溃。
+//     v1.0.4 起：调用前**自行检查引擎关键字段**（与 evalString 内部实现一致），
+//     未就绪则直接返回、绝不触碰引擎。
+//
+//  evalString(this, ...) 内部前置校验（反汇编实证 @0x101186FE8）：
+//      ldr x24, [x0, #0x180]        ; jsThread
+//      bl  pthread_self
+//      cmp x0, x24 ; b.ne -> return 0   ; 非 JS 线程直接返回，不触碰其他字段
+//      然后才 ldr x0, [x19, #0x88] / [x19, #0x90]  (isolate / context)
+//  ⇒ 若 this[0x180] 为 0（引擎未初始化完），调用会走 "失败" 路径，
+//    但在初始化进行中该字段可能是垃圾值/半初始态，故必须自己先判。
 // ---------------------------------------------------------------------------
 static BOOL  g_injected = NO;
 static int   g_tryCount = 0;
 #define  WARRIOR_MAX_TRY  400      // 400 × 0.25s ≈ 100s，覆盖冷启动+资源热更
+
+// 读取引擎关键字段（未就绪/非法返回 NO，绝不调用引擎方法）
+static BOOL warrior_engine_ready(void *se) {
+    if (!se) return NO;
+    // ⚠️ 指针合法性粗校验（防止半构造对象）
+    uintptr_t p = (uintptr_t)se;
+    if (p < 0x100000000UL || (p & 7)) return NO;
+
+    uintptr_t jsThread = 0, isolate = 0, context = 0;
+    @try {
+        jsThread = *(uintptr_t *)((uintptr_t)se + 0x180);
+        isolate  = *(uintptr_t *)((uintptr_t)se + 0x88);
+        context  = *(uintptr_t *)((uintptr_t)se + 0x90);
+    } @catch (NSException *e) { return NO; }
+
+    // jsThread 必须是当前线程（主线程），否则 evalString 会直接返回 0
+    if (jsThread == 0 || jsThread != (uintptr_t)pthread_self()) return NO;
+    if (isolate == 0 || context == 0) return NO;
+    return YES;
+}
 
 // 注入前先设置可写路径（cheat.js 用 window.__WR_PATH__ 拼日志路径）
 static char  g_wr_path[PATH_MAX] = {0};
@@ -104,10 +138,8 @@ static void warrior_try_inject(void) {
     if (g_injected) return;
     g_tryCount++;
 
-    if (!g_getEngine) {
-        if (g_tryCount % 20 == 0) WLOG("wait: getEngine null");
-        return;
-    }
+    if (!g_getEngine || !g_evalString) return;
+
     void *se = NULL;
     @try { se = g_getEngine(); } @catch (NSException *e) { se = NULL; }
     if (!se) {
@@ -115,17 +147,30 @@ static void warrior_try_inject(void) {
         return;
     }
 
-    // ⚠️ evalString 内部有 pthread_self()==engine[0x180] 的 JS 线程校验，
-    //    必须主线程调用（cocos2d-x iOS 的 JS 线程即主线程）
-    NSString *path = warrior_writable_path();
-    NSString *prelude = [NSString stringWithFormat:@"window.__WR_PATH__=%@;",
-                         [NSString stringWithFormat:@"\"%@\"", path]];
-    bool ok = warrior_eval_now(prelude.UTF8String);
-    if (!ok) {
-        if (g_tryCount % 10 == 0) WLOG("eval prelude => FAILED (engine=%p, try#%d)", se, g_tryCount);
+    // ★ 关键：未就绪绝不调用，直接等下一轮（避免触发引擎初始化中的危险窗口）
+    if (!warrior_engine_ready(se)) {
+        if (g_tryCount % 20 == 0) {
+            uintptr_t jt = 0, iso = 0, ctx = 0;
+            @try {
+                jt  = *(uintptr_t *)((uintptr_t)se + 0x180);
+                iso = *(uintptr_t *)((uintptr_t)se + 0x88);
+                ctx = *(uintptr_t *)((uintptr_t)se + 0x90);
+            } @catch (NSException *e) {}
+            WLOG("wait: engine not ready jsThread=%p isolate=%p ctx=%p self=%p (try#%d)",
+                 (void *)jt, (void *)iso, (void *)ctx, (void *)pthread_self(), g_tryCount);
+        }
         return;
     }
-    ok = warrior_eval_now(kCheatJS);
+
+    // 标记「即将调用」，若此后崩溃，日志能证明是 evalString 触发
+    WLOG("calling evalString (engine=%p, try#%d)", se, g_tryCount);
+
+    // 一次只做一次注入尝试；prelude 与主脚本合并为一次调用，减少引擎交互
+    NSString *path = warrior_writable_path();
+    NSString *src = [NSString stringWithFormat:@"window.__WR_PATH__=%@;\n%s",
+                     [NSString stringWithFormat:@"\"%@\"", path],
+                     kCheatJS];
+    bool ok = warrior_eval_now(src.UTF8String);
     WLOG("eval cheat.js => %s (engine=%p, try#%d)", ok ? "OK" : "FAILED", se, g_tryCount);
 
     if (ok) {
@@ -139,7 +184,7 @@ static void warrior_schedule_poll(void) {
         warrior_try_inject();
         if (g_injected) return;
         if (g_tryCount >= WARRIOR_MAX_TRY) { WLOG("give up after %d tries", g_tryCount); return; }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ warrior_schedule_poll(); });
     });
 }
