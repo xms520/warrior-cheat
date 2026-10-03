@@ -129,26 +129,27 @@
     }
   }
 
-  /* ---------- 主循环 ---------- */
-  /* 状态来源(二选一，互为兜底):
-   *  1) window.warriorCheatSet()  —— 原生面板通过 ScriptEngine::evalString 调用
-   *  2) 状态文件轮询 —— jsb.fileUtils 读取原生面板写的 warrior_state.txt
+  /* ---------- 状态来源（二选一，互为兜底）----------
+   *  1) window.warriorCheatSet() —— 原生面板通过 ScriptEngine::evalString 调用（主通道）
+   *  2) 状态文件轮询 —— 仅当 jsb.fileUtils 存在时启用（越狱/可写沙盒环境）
+   *  注意：非越狱(全能签)环境下 fs 可能不可写，此处全程 try/catch，失败不影响主通道
    */
+  var _fileChecked = false;
   function pollStateFile() {
+    if (_fileChecked) return;
     try {
       var fu = (typeof jsb !== 'undefined') && jsb.fileUtils;
-      if (!fu || typeof fu.getStringFromFile !== 'function') return;
+      if (!fu || typeof fu.getStringFromFile !== 'function') { _fileChecked = true; return; }
       var p = (typeof fu.getWritablePath === 'function' ? fu.getWritablePath() : '') + 'warrior_state.txt';
       var s = fu.getStringFromFile(p);
-      if (!s || typeof s !== 'string') return;
+      if (!s || typeof s !== 'string') return;      // 文件还没写，下次再试
       var m = /kill=(\d+),god=(\d+),speed=([0-9.]+)/.exec(s);
-      if (!m) return;
+      if (!m) { _fileChecked = true; return; }
       var k = m[1] === '1', g = m[2] === '1', sp = parseFloat(m[3]) || 1;
-      if (k !== C.kill || g !== C.god || sp !== C.speed) {
-        C.kill = k; C.god = g; C.speed = sp;
-        console.log('[WARRIOR] state from file: kill=' + k + ' god=' + g + ' speed=' + sp);
-      }
-    } catch (e) {}
+      C.kill = k; C.god = g; C.speed = sp;
+      _fileChecked = true;                          // 读到一次即固化
+      console.log('[WARRIOR] state from file: kill=' + k + ' god=' + g + ' speed=' + sp);
+    } catch (e) { _fileChecked = true; }
   }
 
   function tick() {
@@ -160,7 +161,18 @@
       if (C.kill) applyKill();
     } catch (e) { C._lastErr = '' + e; }
   }
-  setInterval(tick, 120);
+
+  // cocos 环境优先用 cc.director 的调度器；退化为原生 setInterval
+  function startLoop() {
+    try {
+      if (typeof cc !== 'undefined' && cc.director && typeof cc.director.getScheduler === 'function') {
+        cc.director.getScheduler().schedule(function () { tick(); }, 0, 0.12, false, 1, 0);
+        return;
+      }
+    } catch (e) {}
+    try { setInterval(tick, 120); } catch (e) {}
+  }
+  startLoop();
 
   /* ---------- 原生面板桥 ---------- */
   C.set = function (k, v) {
