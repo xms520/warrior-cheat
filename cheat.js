@@ -58,22 +58,15 @@
   }
 
   /* ================= 穷举查找 $fc ================= */
-  // 在真正的全局作用域里求值（Function 构造的函数运行于全局作用域）
-  function globalEval(expr) {
-    try { return Function('return (' + expr + ');')(); } catch (e) { return undefined; }
-  }
+  // ⚠️ 不用 Function() 构造（jsb 以 --jitless 运行，代码生成被禁；此处一律直接属性访问）
   function findFC() {
-    // 1) 各种 window 别名
     try { if (window && window.$fc) return { src: 'window', obj: window.$fc }; } catch (e) {}
     try { if (globalThis && globalThis.$fc) return { src: 'globalThis', obj: globalThis.$fc }; } catch (e) {}
     try { if (self && self.$fc) return { src: 'self', obj: self.$fc }; } catch (e) {}
-    // 2) 全局作用域直接取（关键：验证 window/globalThis 差异）
-    var g = globalEval('typeof $fc !== "undefined" ? $fc : null');
-    if (g) return { src: 'globalScope', obj: g };
-    // 3) cc 上
     try { if (cc && cc.$fc) return { src: 'cc', obj: cc.$fc }; } catch (e) {}
-    // 4) cc.game 上
     try { if (cc && cc.game && cc.game.$fc) return { src: 'cc.game', obj: cc.game.$fc }; } catch (e) {}
+    // 游戏把根对象挂在 Game 上（globalThis.Game = Object.assign(b)）
+    try { if (window.Game) return { src: 'window.Game', obj: window.Game }; } catch (e) {}
     return null;
   }
   // 场景对象图里找 GM 面板悬浮球（游戏 GM 面板的注册点）
@@ -108,10 +101,9 @@
     put('typeof_jsb', safe(function () { return typeof jsb; }, '?'));
     put('win.$fc', safe(function () { return window.$fc ? 'Y' : 'N'; }, '?'));
     put('gt.$fc', safe(function () { return globalThis.$fc ? 'Y' : 'N'; }, '?'));
-    put('globalScope.$fc', safe(function () { return globalEval('typeof $fc !== "undefined" && !!$fc') ? 'Y' : 'N'; }, '?'));
-    put('typeof_$fc', safe(function () { return globalEval('typeof $fc'); }, '?'));
+    put('win.Game', safe(function () { return window.Game ? 'Y' : 'N'; }, '?'));
     put('win.debugCmd', safe(function () { return window.debugCmd ? 'Y' : 'N'; }, '?'));
-    put('globalScope.debugCmd', safe(function () { return globalEval('typeof debugCmd !== "undefined" && !!debugCmd') ? 'Y' : 'N'; }, '?'));
+    put('win.GameInstance', safe(function () { return (window.Game && window.Game.GameInstance) ? 'Y' : 'N'; }, '?'));
     put('win.__require', safe(function () { return typeof window.__require; }, '?'));
     put('cc.game', safe(function () { return (cc && cc.game) ? 'Y' : 'N'; }, '?'));
     put('cc.director', safe(function () { return (cc && cc.director) ? 'Y' : 'N'; }, '?'));
@@ -133,17 +125,28 @@
     }, '?'));
     // ★ 关键：dump window / globalThis 的 key（判断两者是否同一对象、游戏全局挂在哪）
     put('winKeys', safe(function () { return Object.keys(window).length; }, '?'));
-    put('gtKeys', safe(function () { return Object.keys(globalThis).length; }, '?'));
     put('winKeyList', safe(function () {
       var ks = Object.keys(window);
-      // 优先展示含 $ / cc / game / debug 的 key
-      var hot = ks.filter(function (k) { return /[$]/.test(k) || /^(cc|jsb|game|debug|GameData|msg|net)/i.test(k); });
-      return hot.slice(0, 60).join(',') || '(none)';
+      var hot = ks.filter(function (k) { return /[$]/.test(k) || /^(cc|jsb|game|debug|GameData|msg|net|Game|Bingo)/i.test(k); });
+      return hot.slice(0, 120).join(',') || '(none)';
     }, '?'));
-    put('gtKeyList', safe(function () {
-      var ks = Object.keys(globalThis);
-      var hot = ks.filter(function (k) { return /[$]/.test(k) || /^(cc|jsb|game|debug|GameData|msg|net)/i.test(k); });
-      return hot.slice(0, 60).join(',') || '(none)';
+    // ★ 逐一检查游戏全局候选
+    var cands = ['$fc', 'Game', '$fK', '$fa', '$eZ', 'GameInstance', '$fd', 'cv', '$fg', '$fe'];
+    for (var ci = 0; ci < cands.length; ci++) {
+      var name = cands[ci];
+      (function (nm) {
+        put('G.' + nm, safe(function () {
+          var v = window[nm];                       // 直接属性访问，不用 Function()
+          if (!v) return 'N';
+          var ks = [];
+          try { ks = Object.keys(v); } catch (e) {}
+          return 'Y(' + (typeof v) + ':' + ks.length + ':' + ks.slice(0, 25).join('|') + ')';
+        }, '?'));
+      })(name);
+    }
+    // ★ 尝试从候选里找 battleMgr / 战斗相关
+    put('G.Game.battleMgr', safe(function () {
+      return (window.Game && window.Game.battleMgr) ? 'Y' : 'N';
     }, '?'));
     put('err', C.err || '-');
     put('buf', C._buf.length);
@@ -221,7 +224,7 @@
     C._tickN++;
     try {
       // 每帧刷新独立诊断文件（覆盖写，永远最新）
-      if (C._tickN % 5 === 1) snapshotCtx();
+      if (C._tickN % 300 === 1) snapshotCtx();   // ★ 降频：避免帧循环内文件 IO 风暴
 
       if (!gameReady()) {
         if (C._tickN % 200 === 1 && C._waitLogN++ < 15) {
