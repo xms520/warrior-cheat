@@ -376,14 +376,21 @@ static void warrior_refresh_panel(void) {
     warrior_refresh_panel();
     return self;
 }
+// ★ v1.0.11 隔离实验：每次点击在 evalString 前后各落一条时间戳日志
+//   若崩在 "-> eval" 与 "eval ok" 之间 ⇒ JS 调用崩溃
+//   若崩在 "eval ok" 之后 ⇒ 与 JS 无关（原生 UI / 其他）
 - (void)onKill {
     g_kill = !g_kill;
+    WLOG("btn kill -> eval (v=%d)", g_kill);
     warrior_eval_fmt(@"window.warriorCheatSet&&window.warriorCheatSet('kill',%@);", g_kill ? @"true" : @"false");
+    WLOG("btn kill eval ok");
     warrior_refresh_panel();
 }
 - (void)onGod {
     g_god = !g_god;
+    WLOG("btn god -> eval (v=%d)", g_god);
     warrior_eval_fmt(@"window.warriorCheatSet&&window.warriorCheatSet('god',%@);", g_god ? @"true" : @"false");
+    WLOG("btn god eval ok");
     warrior_refresh_panel();
 }
 - (void)onSpeed {
@@ -391,12 +398,16 @@ static void warrior_refresh_panel(void) {
     static int idx = 0;
     idx = (idx + 1) % 5;
     g_speed = steps[idx];
+    WLOG("btn speed -> eval (v=%.1f)", g_speed);
     warrior_eval_fmt(@"window.warriorCheatSet&&window.warriorCheatSet('speed',%.2f);", g_speed);
+    WLOG("btn speed eval ok");
     warrior_refresh_panel();
 }
 - (void)onAuto {
     g_auto = !g_auto;
+    WLOG("btn auto -> eval (v=%d)", g_auto);
     warrior_eval_fmt(@"window.warriorCheatSet&&window.warriorCheatSet('auto',%@);", g_auto ? @"true" : @"false");
+    WLOG("btn auto eval ok");
     warrior_refresh_panel();
 }
 - (void)onClose { [g_panel removeFromSuperview]; g_panel = nil; }
